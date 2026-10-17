@@ -54,6 +54,7 @@ import javax.crypto.SecretKey;
 import java.net.InetSocketAddress;
 import java.security.KeyPair;
 import java.security.PublicKey;
+import java.util.Map;
 import java.util.function.BiConsumer;
 
 public class LoginEncryptionUtils {
@@ -174,27 +175,75 @@ public class LoginEncryptionUtils {
     }
 
     /**
+     * The outcome of parsing a splitscreen sub-client login. Anything other than
+     * {@link #SUCCESS} means the sub session must be closed and the console told.
+     */
+    public enum SubClientLoginResult {
+        SUCCESS("joined"),
+        /**
+         * A console sends this for couch co-op players that have no Xbox Live sign-in. The chain
+         * cannot be verified against Mojang, but the sub-client shares the connection of an
+         * already authenticated primary player, so the identity is accepted as-is.
+         */
+        UNVERIFIED("was not signed by Mojang"),
+        INVALID_CLIENT_DATA("sent client data that could not be verified"),
+        NO_IDENTITY("did not send a usable username"),
+        ERROR("hit an unexpected error while parsing the login");
+
+        private final String description;
+
+        SubClientLoginResult(String description) {
+            this.description = description;
+        }
+
+        public boolean isSuccess() {
+            return this == SUCCESS;
+        }
+
+        @Override
+        public String toString() {
+            return this.description;
+        }
+    }
+
+    /**
      * Handles the login of a splitscreen sub-client that sent a {@code SubClientLoginPacket}.
      * The connection is already encrypted by the main client's login and no resource pack
      * exchange takes place for sub-clients, so this only parses the identity and client data
      * of the additional player. No encryption handshake is performed.
-     *
-     * @return {@code true} if the login data was successfully parsed and applied to the session
+     * <p>
+     * Unlike the primary client, a sub-client is allowed to be a guest or self-signed: on a console
+     * the second couch co-op player often has no Xbox Live sign-in of their own, and the console
+     * only transmits the sub-client ID and XUID for the primary player (Mojang bug MCPE-71033).
+     * The sub-client still rides the already authenticated connection of its primary player, so
+     * this does not allow a client that could not join as the primary player to begin with.
      */
-    public static boolean handleSubClientLogin(GeyserSession session, AuthPayload authPayload, String clientJwt) {
+    public static SubClientLoginResult handleSubClientLogin(GeyserSession session, AuthPayload authPayload, String clientJwt) {
         GeyserImpl geyser = session.getGeyser();
+        AuthType authType = authPayload.getAuthType();
         try {
-            // Splitscreen players must sign into their own Xbox account; guest accounts cannot join
-            if (authPayload.getAuthType() == AuthType.GUEST) {
-                return false;
-            }
-
             ChainValidationResult result = EncryptionUtils.validatePayload(authPayload);
-            if (!result.signed() && geyser.config().advanced().bedrock().validateBedrockLogin()) {
-                return false;
+            geyser.getLogger().debug("Splitscreen login: authType=%s, signed=%s, identityClaims=%s",
+                authType, result.signed(), result.identityClaims() != null);
+
+            // Only the primary client has to pass Xbox authentication. A guest or self-signed
+            // sub-client cannot be verified against Mojang, and rejecting it would lock out every
+            // console whose second couch co-op player has no Microsoft account of their own. The
+            // sub-client still rides the already authenticated connection of its primary player.
+            boolean unverifiable = authType == AuthType.GUEST || authType == AuthType.SELF_SIGNED;
+            if (!unverifiable && !result.signed() && geyser.config().advanced().bedrock().validateBedrockLogin()) {
+                return SubClientLoginResult.UNVERIFIED;
             }
 
-            Long rawIssuedAt = (Long) result.rawIdentityClaims().get("iat");
+            ChainValidationResult.IdentityClaims identityClaims = result.identityClaims();
+            if (identityClaims == null) {
+                return SubClientLoginResult.NO_IDENTITY;
+            }
+
+            // Guarded because the library dereferences its JWT context without a null check,
+            // which is absent on payloads that carry no signed identity
+            Map<String, Object> rawIdentityClaims = result.rawIdentityClaims();
+            Long rawIssuedAt = rawIdentityClaims != null ? (Long) rawIdentityClaims.get("iat") : null;
             long issuedAt = rawIssuedAt != null ? rawIssuedAt : -1;
 
             if (authPayload instanceof TokenPayload tokenPayload) {
@@ -203,35 +252,73 @@ public class LoginEncryptionUtils {
                 session.setCertChainData(certificateChainPayload.getChain());
             }
 
-            PublicKey identityPublicKey = result.identityClaims().parsedIdentityPublicKey();
-            byte[] clientDataPayload = EncryptionUtils.verifyClientData(clientJwt, identityPublicKey);
-            if (clientDataPayload == null) {
-                geyser.getLogger().debug("Splitscreen client data isn't signed by the given chain data!");
-                return false;
+            // A guest sub-client has no Mojang-signed identity, so the client data cannot be
+            // checked against a key we can trust. Fall back to the primary player's data instead
+            // of rejecting outright; only the fields the console omits are taken from there.
+            BedrockClientData data = null;
+            PublicKey identityPublicKey = identityClaims.parsedIdentityPublicKey();
+            if (identityPublicKey != null && clientJwt != null) {
+                byte[] clientDataPayload = EncryptionUtils.verifyClientData(clientJwt, identityPublicKey);
+                if (clientDataPayload != null) {
+                    data = JsonUtils.fromJson(clientDataPayload, BedrockClientData.class);
+                    data.setOriginalString(clientJwt);
+                }
             }
 
-            BedrockClientData data = JsonUtils.fromJson(clientDataPayload, BedrockClientData.class);
-            data.setOriginalString(clientJwt);
-            // Sub-client data can be missing fields the main client already sent; inherit those
+            if (data == null) {
+                data = session.getMainSession().getClientData();
+                if (data == null) {
+                    return SubClientLoginResult.INVALID_CLIENT_DATA;
+                }
+                geyser.getLogger().debug("Splitscreen login: reusing the primary player's client data");
+            }
+
+            // A console sends a far sparser client data blob for a sub-client than for the primary
+            // player. Every field below is dereferenced without a null check somewhere on the join
+            // path, so anything missing is inherited from the primary player on the same connection.
             BedrockClientData mainData = session.getMainSession().getClientData();
-            if (mainData != null) {
+            if (mainData != null && data != mainData) {
+                if (data.getServerAddress() == null) {
+                    data.setServerAddress(mainData.getServerAddress());
+                }
                 if (data.getLanguageCode() == null) {
                     data.setLanguageCode(mainData.getLanguageCode());
                 }
                 if (data.getGameVersion() == null) {
                     data.setGameVersion(mainData.getGameVersion());
                 }
+                if (data.getDeviceOs() == null) {
+                    data.setDeviceOs(mainData.getDeviceOs());
+                }
+                if (data.getUiProfile() == null) {
+                    data.setUiProfile(mainData.getUiProfile());
+                }
+                if (data.getCurrentInputMode() == null) {
+                    data.setCurrentInputMode(mainData.getCurrentInputMode());
+                }
+                if (data.getCapeId() == null) {
+                    data.setCapeId(mainData.getCapeId());
+                }
+            }
+
+            // The join address is parsed from here during the Java handshake, so it must be present
+            if (data.getServerAddress() == null) {
+                return SubClientLoginResult.INVALID_CLIENT_DATA;
             }
             session.setClientData(data);
 
-            IdentityData extraData = result.identityClaims().extraData;
-            session.setAuthData(new AuthData(extraData.displayName, extraData.identity, extraData.xuid, issuedAt, extraData.minecraftId));
-            return true;
-        } catch (Exception ex) {
-            if (geyser.config().debugMode()) {
-                ex.printStackTrace();
+            IdentityData extraData = identityClaims.extraData;
+            String displayName = extraData != null ? extraData.displayName : null;
+            if (displayName == null || displayName.isBlank()) {
+                // Without a username there is nothing to build a stable identity from
+                return SubClientLoginResult.NO_IDENTITY;
             }
-            return false;
+
+            session.setAuthData(new AuthData(displayName, extraData.identity, extraData.xuid, issuedAt, extraData.minecraftId));
+            return SubClientLoginResult.SUCCESS;
+        } catch (Exception ex) {
+            geyser.getLogger().error("Unexpected error while handling a splitscreen login!", ex);
+            return SubClientLoginResult.ERROR;
         }
     }
 

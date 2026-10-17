@@ -92,15 +92,19 @@ public abstract class GeyserServerInitializer extends BedrockServerInitializer {
      */
     private void initSubClientSession(@NonNull BedrockServerSession bedrockServerSession) {
         if (!this.geyser.config().splitscreen().enabled()) {
-            // No way to show a message to a single splitscreen player, so this is only logged
-            this.geyser.getLogger().info("Rejected a splitscreen player; enable splitscreen in the Geyser config to allow them.");
+            // Still needs a handler, otherwise the console keeps retrying a sub-client nobody answers
+            bedrockServerSession.setPacketHandler(SubClientUpstreamPacketHandler.rejecting(this.geyser,
+                bedrockServerSession, "Splitscreen players are not enabled on this server."));
+            this.geyser.getLogger().debug("Rejected a splitscreen player; enable splitscreen in the Geyser config to allow them.");
             return;
         }
 
         GeyserSession mainSession = bedrockServerSession.getPeer() instanceof GeyserBedrockPeer peer
             ? peer.getMainSession() : null;
         if (mainSession == null || mainSession.isClosed()) {
-            this.geyser.getLogger().info("Rejected a splitscreen player; the primary player is no longer connected.");
+            bedrockServerSession.setPacketHandler(SubClientUpstreamPacketHandler.rejecting(this.geyser,
+                bedrockServerSession, "The primary player is no longer connected."));
+            this.geyser.getLogger().debug("Rejected a splitscreen player; the primary player is no longer connected.");
             return;
         }
 

@@ -234,7 +234,9 @@ public class SkinManager {
             byte[] geometryNameBytes = clientData.getGeometryName();
             byte[] geometryBytes = clientData.getGeometryData();
 
-            if (skinBytes.length <= (128 * 128 * 4) && !clientData.isPersonaSkin()) {
+            // A splitscreen sub-client on a console can be sent without any skin data at all, so
+            // there may be nothing to cache; the player then keeps the default skin
+            if (skinBytes != null && skinBytes.length <= (128 * 128 * 4) && !clientData.isPersonaSkin()) {
                 SkinProvider.storeBedrockSkin(playerEntity.uuid(), clientData.getSkinId(), skinBytes);
                 SkinProvider.storeBedrockGeometry(playerEntity.uuid(), geometryNameBytes, geometryBytes);
             } else if (geyser.config().debugMode()) {
@@ -242,7 +244,7 @@ public class SkinManager {
                 geyser.getLogger().debug("The size of '" + playerEntity.getUsername() + "' skin is: " + clientData.getSkinImageWidth() + "x" + clientData.getSkinImageHeight());
             }
 
-            if (!clientData.getCapeId().isEmpty()) {
+            if (capeBytes != null && clientData.getCapeId() != null && !clientData.getCapeId().isEmpty()) {
                 SkinProvider.storeBedrockCape(clientData.getCapeId(), capeBytes);
             }
         } catch (Exception e) {

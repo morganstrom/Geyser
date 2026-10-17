@@ -40,6 +40,7 @@ import org.geysermc.geyser.registry.Registries;
 import org.geysermc.geyser.session.GeyserSession;
 import org.geysermc.geyser.session.auth.AuthData;
 import org.geysermc.geyser.util.LoginEncryptionUtils;
+import org.geysermc.geyser.util.LoginEncryptionUtils.SubClientLoginResult;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -55,12 +56,20 @@ import java.util.Locale;
  */
 public class SubClientUpstreamPacketHandler extends LoggingPacketHandler {
     private final BedrockServerSession upstream;
+    /**
+     * The primary session hosting this console. Null in {@linkplain #rejecting rejecting} mode.
+     */
     private final GeyserSession mainSession;
     /**
      * Recreated whenever the splitscreen player leaves and rejoins; super keeps the first instance.
+     * Null in {@linkplain #rejecting rejecting} mode.
      */
     private GeyserSession subSession;
     private boolean loginCompleted;
+    /**
+     * When set, no session is created and the console is simply turned away. See {@link #rejecting}.
+     */
+    private final String rejectReason;
 
     public SubClientUpstreamPacketHandler(GeyserImpl geyser, BedrockServerSession upstream,
                                           GeyserSession subSession, GeyserSession mainSession) {
@@ -68,6 +77,24 @@ public class SubClientUpstreamPacketHandler extends LoggingPacketHandler {
         this.upstream = upstream;
         this.subSession = subSession;
         this.mainSession = mainSession;
+        this.rejectReason = null;
+    }
+
+    private SubClientUpstreamPacketHandler(GeyserImpl geyser, BedrockServerSession upstream, String rejectReason) {
+        super(geyser, null);
+        this.upstream = upstream;
+        this.subSession = null;
+        this.mainSession = null;
+        this.rejectReason = rejectReason;
+    }
+
+    /**
+     * A handler that refuses this console without creating a session at all, used when splitscreen
+     * is turned off or the primary player is gone. Handling packets without a handler would leave
+     * the sub-client retrying indefinitely.
+     */
+    public static SubClientUpstreamPacketHandler rejecting(GeyserImpl geyser, BedrockServerSession upstream, String reason) {
+        return new SubClientUpstreamPacketHandler(geyser, upstream, reason);
     }
 
     @Override
@@ -81,12 +108,19 @@ public class SubClientUpstreamPacketHandler extends LoggingPacketHandler {
 
     @Override
     public PacketSignal handle(SubClientLoginPacket packet) {
+        if (rejectReason != null) {
+            geyser.getLogger().debug("Refusing splitscreen login: " + rejectReason);
+            sendSubClientDisconnect(rejectReason);
+            return PacketSignal.HANDLED;
+        }
+
         if (geyser.isShuttingDown() || geyser.isReloading()) {
             return PacketSignal.HANDLED;
         }
 
         if (mainSession.isClosed()) {
             geyser.getLogger().debug("Refusing splitscreen login: the primary player is no longer connected.");
+            reject("The primary player is no longer connected.");
             return PacketSignal.HANDLED;
         }
 
@@ -100,12 +134,10 @@ public class SubClientUpstreamPacketHandler extends LoggingPacketHandler {
             return PacketSignal.HANDLED;
         }
 
-        if (!LoginEncryptionUtils.handleSubClientLogin(subSession, packet.getAuthPayload(), packet.getClientJwt())) {
-            // We cannot show a kick message to a sub-client without also kicking the primary player,
-            // so this only shows up in the console log
-            geyser.getLogger().info("A splitscreen player failed to sign in! They must be signed into their "
-                + "own Microsoft account that has joined the Java server before. ("
-                + subSession.getUpstream().getAddress().getAddress() + ")");
+        SubClientLoginResult result = LoginEncryptionUtils.handleSubClientLogin(subSession,
+            packet.getAuthPayload(), packet.getClientJwt());
+        if (!result.isSuccess()) {
+            reject("This splitscreen player " + result + ".");
             return PacketSignal.HANDLED;
         }
 
@@ -124,7 +156,7 @@ public class SubClientUpstreamPacketHandler extends LoggingPacketHandler {
 
         if (geyser.getSessionManager().isXuidAlreadyPending(subSession.xuid())
             || geyser.getSessionManager().sessionByXuid(subSession.xuid()) != null) {
-            geyser.getLogger().info(subSession.bedrockUsername() + " is already logged in! (splitscreen)");
+            reject(subSession.bedrockUsername() + " is already logged in.");
             return PacketSignal.HANDLED;
         }
 
@@ -173,6 +205,42 @@ public class SubClientUpstreamPacketHandler extends LoggingPacketHandler {
     private void leave() {
         if (subSession != null && !subSession.isClosed()) {
             subSession.disconnect(Component.text("Splitscreen player left"));
+        }
+    }
+
+    /**
+     * Turns down this splitscreen player. The console is told explicitly, because a sub-client it
+     * never hears back from just keeps retrying, and a retry flood is enough to trip the RakNet
+     * rate limiter and drop the primary player with them. The packet has to be addressed to this
+     * sub-client ID, since the console routes by target sub-client ID.
+     * <p>
+     * The session is then closed so its tick thread stops and it stops holding references.
+     */
+    private void reject(String reason) {
+        // Respects the same privacy setting the rest of Geyser uses for player addresses
+        String address = geyser.config().logPlayerIpAddresses()
+            ? subSession.getUpstream().getAddress().getAddress().toString() : "<IP address withheld>";
+        geyser.getLogger().info("Rejected a splitscreen player: " + reason + " (" + address + ")");
+        sendSubClientDisconnect(reason);
+
+        if (subSession != null && !subSession.isClosed()) {
+            // Closes the session without a second disconnect packet, so the primary player stays
+            subSession.disconnect(Component.text("Splitscreen player rejected"));
+        }
+    }
+
+    /**
+     * Tells the console to drop this splitscreen player. Routed by target sub-client ID, otherwise
+     * the primary player would be kicked instead.
+     */
+    private void sendSubClientDisconnect(String reason) {
+        if (upstream instanceof GeyserBedrockServerSession bedrockSession
+            && upstream.getPeer() instanceof GeyserBedrockPeer peer
+            && upstream.getPeer().isConnected()) {
+            DisconnectPacket disconnect = new DisconnectPacket();
+            disconnect.setMessageSkipped(false);
+            disconnect.setKickMessage(reason);
+            peer.sendPacket(0, bedrockSession.getSubClientId(), disconnect);
         }
     }
 

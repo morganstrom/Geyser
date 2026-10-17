@@ -55,6 +55,7 @@ public final class BedrockClientData {
     @Setter
     @SerializedName(value = "GameVersion")
     private String gameVersion;
+    @Setter
     @SerializedName(value = "ServerAddress")
     private String serverAddress;
     @SerializedName(value = "ThirdPartyName")
@@ -72,6 +73,7 @@ public final class BedrockClientData {
     private int skinImageHeight;
     @SerializedName(value = "SkinImageWidth")
     private int skinImageWidth;
+    @Setter
     @SerializedName(value = "CapeId")
     private String capeId;
     @SerializedName(value = "CapeData")
@@ -100,14 +102,17 @@ public final class BedrockClientData {
     private String deviceId;
     @SerializedName(value = "DeviceModel")
     private String deviceModel;
+    @Setter
     @SerializedName(value = "DeviceOS")
     @JsonAdapter(value = IntToEnumTypeFactory.class)
     private DeviceOs deviceOs;
+    @Setter
     @SerializedName(value = "UIProfile")
     @JsonAdapter(value = IntToEnumTypeFactory.class)
     private UiProfile uiProfile;
     @SerializedName(value = "GuiScale")
     private int guiScale;
+    @Setter
     @SerializedName(value = "CurrentInputMode")
     @JsonAdapter(value = IntToEnumTypeFactory.class)
     private InputMode currentInputMode;
