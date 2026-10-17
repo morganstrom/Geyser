@@ -174,6 +174,68 @@ public class LoginEncryptionUtils {
     }
 
     /**
+     * Handles the login of a splitscreen sub-client that sent a {@code SubClientLoginPacket}.
+     * The connection is already encrypted by the main client's login and no resource pack
+     * exchange takes place for sub-clients, so this only parses the identity and client data
+     * of the additional player. No encryption handshake is performed.
+     *
+     * @return {@code true} if the login data was successfully parsed and applied to the session
+     */
+    public static boolean handleSubClientLogin(GeyserSession session, AuthPayload authPayload, String clientJwt) {
+        GeyserImpl geyser = session.getGeyser();
+        try {
+            // Splitscreen players must sign into their own Xbox account; guest accounts cannot join
+            if (authPayload.getAuthType() == AuthType.GUEST) {
+                return false;
+            }
+
+            ChainValidationResult result = EncryptionUtils.validatePayload(authPayload);
+            if (!result.signed() && geyser.config().advanced().bedrock().validateBedrockLogin()) {
+                return false;
+            }
+
+            Long rawIssuedAt = (Long) result.rawIdentityClaims().get("iat");
+            long issuedAt = rawIssuedAt != null ? rawIssuedAt : -1;
+
+            if (authPayload instanceof TokenPayload tokenPayload) {
+                session.setToken(tokenPayload.getToken());
+            } else if (authPayload instanceof CertificateChainPayload certificateChainPayload) {
+                session.setCertChainData(certificateChainPayload.getChain());
+            }
+
+            PublicKey identityPublicKey = result.identityClaims().parsedIdentityPublicKey();
+            byte[] clientDataPayload = EncryptionUtils.verifyClientData(clientJwt, identityPublicKey);
+            if (clientDataPayload == null) {
+                geyser.getLogger().debug("Splitscreen client data isn't signed by the given chain data!");
+                return false;
+            }
+
+            BedrockClientData data = JsonUtils.fromJson(clientDataPayload, BedrockClientData.class);
+            data.setOriginalString(clientJwt);
+            // Sub-client data can be missing fields the main client already sent; inherit those
+            BedrockClientData mainData = session.getMainSession().getClientData();
+            if (mainData != null) {
+                if (data.getLanguageCode() == null) {
+                    data.setLanguageCode(mainData.getLanguageCode());
+                }
+                if (data.getGameVersion() == null) {
+                    data.setGameVersion(mainData.getGameVersion());
+                }
+            }
+            session.setClientData(data);
+
+            IdentityData extraData = result.identityClaims().extraData;
+            session.setAuthData(new AuthData(extraData.displayName, extraData.identity, extraData.xuid, issuedAt, extraData.minecraftId));
+            return true;
+        } catch (Exception ex) {
+            if (geyser.config().debugMode()) {
+                ex.printStackTrace();
+            }
+            return false;
+        }
+    }
+
+    /**
      * Disconnects the session when the transport identity binding turned the login away.
      *
      * @param refusal why the binding refused it, or null when it did not

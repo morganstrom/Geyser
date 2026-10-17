@@ -63,6 +63,9 @@ public interface GeyserConfig {
     @Comment("Gameplay options that affect Bedrock players")
     GameplayConfig gameplay();
 
+    @Comment("Settings for splitscreen (couch co-op) players on Bedrock consoles")
+    SplitscreenConfig splitscreen();
+
     @Comment("The default locale if we don't have the one the client requested. If set to \"system\", the system's language will be used.")
     @DefaultString(GeyserLocale.SYSTEM_LOCALE)
     @NonNull
@@ -511,6 +514,19 @@ public interface GeyserConfig {
         @Comment("The radius in blocks around the player in which custom skulls are displayed.")
         @DefaultNumeric(32)
         int customSkullRenderDistance();
+    }
+
+    @ConfigSerializable
+    interface SplitscreenConfig {
+        @Comment("""
+            Whether splitscreen (couch co-op) players on Bedrock consoles are allowed to join.
+            When a second controller joins the game on the same console, that player is treated as
+            a regular player that shares the console's network connection.
+            Every splitscreen player needs to be signed into their own Microsoft account.
+            Note: consoles do not send the XUID of splitscreen players (Mojang bug MCPE-71033),
+            so a stable fake XUID is generated from the player's username instead.""")
+        @DefaultBoolean(false)
+        boolean enabled();
     }
 
     @ConfigSerializable

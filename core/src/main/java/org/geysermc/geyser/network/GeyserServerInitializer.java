@@ -35,7 +35,9 @@ import org.cloudburstmc.protocol.bedrock.BedrockServerSession;
 import org.cloudburstmc.protocol.bedrock.netty.initializer.BedrockServerInitializer;
 import org.geysermc.geyser.GeyserImpl;
 import org.geysermc.geyser.network.bedrock.GeyserBedrockPeer;
+import org.geysermc.geyser.network.bedrock.GeyserBedrockServerSession;
 import org.geysermc.geyser.network.bedrock.InvalidPacketHandler;
+import org.geysermc.geyser.network.bedrock.SubClientUpstreamPacketHandler;
 import org.geysermc.geyser.network.bedrock.UpstreamPacketHandler;
 import org.geysermc.geyser.session.GeyserSession;
 
@@ -58,15 +60,22 @@ public abstract class GeyserServerInitializer extends BedrockServerInitializer {
     public void initSession(@NonNull BedrockServerSession bedrockServerSession) {
         try {
             bedrockServerSession.setLogging(this.geyser.config().debugMode());
-            GeyserSession session = new GeyserSession(this.geyser, bedrockServerSession, this.eventLoopGroup.next());
 
-            if (!bedrockServerSession.isSubClient()) {
-                Channel channel = bedrockServerSession.getPeer().getChannel();
-                // Added after BedrockPeer, not BedrockPacketCodec to ensure exceptions thrown while dispatching
-                // to the packet handler also get here if no other handler exists
-                // FIXME not ideal for e.g. UpstreamPacketHandler having a couple of its own packet handlers
-                channel.pipeline().addAfter(BedrockPeer.NAME, InvalidPacketHandler.NAME, new InvalidPacketHandler(session));
+            if (bedrockServerSession.isSubClient()) {
+                initSubClientSession(bedrockServerSession);
+                return;
             }
+
+            GeyserSession session = new GeyserSession(this.geyser, bedrockServerSession, this.eventLoopGroup.next());
+            if (bedrockServerSession.getPeer() instanceof GeyserBedrockPeer peer) {
+                peer.setMainSession(session);
+            }
+
+            Channel channel = bedrockServerSession.getPeer().getChannel();
+            // Added after BedrockPeer, not BedrockPacketCodec to ensure exceptions thrown while dispatching
+            // to the packet handler also get here if no other handler exists
+            // FIXME not ideal for e.g. UpstreamPacketHandler having a couple of its own packet handlers
+            channel.pipeline().addAfter(BedrockPeer.NAME, InvalidPacketHandler.NAME, new InvalidPacketHandler(session));
 
             bedrockServerSession.setPacketHandler(new UpstreamPacketHandler(this.geyser, session));
         } catch (Throwable e) {
@@ -76,8 +85,38 @@ public abstract class GeyserServerInitializer extends BedrockServerInitializer {
         }
     }
 
+    /**
+     * A splitscreen (couch co-op) player on a Bedrock console reuses the connection of the primary
+     * player, so its session is linked to the primary one and handled separately. No encryption
+     * handshake or resource pack exchange takes place here; the primary player already did both.
+     */
+    private void initSubClientSession(@NonNull BedrockServerSession bedrockServerSession) {
+        if (!this.geyser.config().splitscreen().enabled()) {
+            // No way to show a message to a single splitscreen player, so this is only logged
+            this.geyser.getLogger().info("Rejected a splitscreen player; enable splitscreen in the Geyser config to allow them.");
+            return;
+        }
+
+        GeyserSession mainSession = bedrockServerSession.getPeer() instanceof GeyserBedrockPeer peer
+            ? peer.getMainSession() : null;
+        if (mainSession == null || mainSession.isClosed()) {
+            this.geyser.getLogger().info("Rejected a splitscreen player; the primary player is no longer connected.");
+            return;
+        }
+
+        GeyserSession subSession = new GeyserSession(this.geyser, bedrockServerSession,
+            mainSession.getTickEventLoop(), mainSession);
+        bedrockServerSession.setPacketHandler(
+            new SubClientUpstreamPacketHandler(this.geyser, bedrockServerSession, subSession, mainSession));
+    }
+
     @Override
     protected BedrockPeer createPeer(Channel channel) {
         return new GeyserBedrockPeer(channel, this::createSession);
+    }
+
+    @Override
+    public BedrockServerSession createSession0(BedrockPeer peer, int subClientId) {
+        return new GeyserBedrockServerSession(peer, subClientId);
     }
 }

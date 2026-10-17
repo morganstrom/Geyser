@@ -52,12 +52,14 @@ import java.util.UUID;
 
 @Getter
 public final class BedrockClientData {
+    @Setter
     @SerializedName(value = "GameVersion")
     private String gameVersion;
     @SerializedName(value = "ServerAddress")
     private String serverAddress;
     @SerializedName(value = "ThirdPartyName")
     private String username;
+    @Setter
     @SerializedName(value = "LanguageCode")
     private String languageCode;
 

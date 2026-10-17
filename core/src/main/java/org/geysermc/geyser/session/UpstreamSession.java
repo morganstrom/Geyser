@@ -47,6 +47,8 @@ public class UpstreamSession {
 
     public void sendPacket(@NonNull BedrockPacket packet) {
         if (!isClosed()) {
+            // For a splitscreen sub-client the library addresses the packet to this player's
+            // sub-client ID, so it reaches their screen instead of the primary player's
             session.sendPacket(packet);
         }
     }
@@ -75,7 +77,7 @@ public class UpstreamSession {
 
         BedrockPacket packet;
         while ((packet = postStartGamePackets.poll()) != null) {
-            session.sendPacket(packet);
+            sendPacket(packet);
         }
         postStartGamePackets = null;
     }

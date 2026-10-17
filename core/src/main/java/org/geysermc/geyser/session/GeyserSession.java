@@ -164,6 +164,7 @@ import org.geysermc.geyser.level.gamerule.GameRuleHandler;
 import org.geysermc.geyser.level.physics.CollisionManager;
 import org.geysermc.geyser.network.JoinAddress;
 import org.geysermc.geyser.network.bedrock.GameProtocol;
+import org.geysermc.geyser.network.bedrock.GeyserBedrockServerSession;
 import org.geysermc.geyser.network.java.LocalSession;
 import org.geysermc.geyser.registry.Registries;
 import org.geysermc.geyser.registry.java.JavaRegistries;
@@ -278,6 +279,16 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
      * If this is manually called, ensure that any exceptions are properly handled.
      */
     private final EventLoop tickEventLoop;
+    /**
+     * For a splitscreen sub-client, the primary session of the same console connection.
+     * Null for the primary client itself.
+     */
+    private final GeyserSession mainSession;
+    /**
+     * Splitscreen sub-client sessions hosted on the same console connection as this primary session.
+     * Empty for sub-client sessions.
+     */
+    private final List<GeyserSession> subSessions = new CopyOnWriteArrayList<>();
     @Setter
     private AuthData authData;
     private BedrockClientData clientData;
@@ -855,9 +866,19 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
     private boolean pendingSpectator = false;
 
     public GeyserSession(GeyserImpl geyser, BedrockServerSession bedrockServerSession, EventLoop tickEventLoop) {
+        this(geyser, bedrockServerSession, tickEventLoop, null);
+    }
+
+    /**
+     * Creates a session for a Bedrock client. Splitscreen sub-client sessions share the console
+     * connection of their {@code mainSession} and are linked back to it.
+     */
+    public GeyserSession(GeyserImpl geyser, BedrockServerSession bedrockServerSession, EventLoop tickEventLoop,
+                         @Nullable GeyserSession mainSession) {
         this.geyser = geyser;
         this.upstream = new UpstreamSession(bedrockServerSession);
         this.tickEventLoop = tickEventLoop;
+        this.mainSession = mainSession;
 
         this.erosionHandler = new GeyserboundHandshakePacketHandler(this);
 
@@ -1240,6 +1261,17 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
 
     public void disconnect(Component reason) {
         if (!closed) {
+            if (mainSession != null) {
+                // Splitscreen sub-client: remove ourselves from the console connection's player list
+                mainSession.getSubSessions().remove(this);
+            } else if (!subSessions.isEmpty()) {
+                // Primary client: the whole console is leaving, so its splitscreen players leave too
+                for (GeyserSession subSession : subSessions) {
+                    subSession.disconnect(reason);
+                }
+                subSessions.clear();
+            }
+
             loggedIn = false;
 
             SessionDisconnectEvent disconnectEvent = new SessionDisconnectEventImpl(this, reason);
@@ -1262,7 +1294,9 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
             }
 
             // Disconnect upstream if necessary
-            if (!upstream.isClosed()) {
+            // A sub-client shares the console connection of its main session and the library would
+            // send the DisconnectPacket to the primary player, so only clean up locally
+            if (!upstream.isClosed() && mainSession == null) {
                 upstream.disconnect(disconnectEvent.disconnectReason());
             }
 
@@ -1426,7 +1460,13 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
             this.dialogManager.tick();
             this.waypointCache.tick();
 
-            this.upstream.getSession().getPeer().sendPacketsImmediately(0, 0, queuedImmediatelyPackets.toArray(new BedrockPacket[0]));
+            // A splitscreen sub-client sends and targets its own sub-client ID, so the console
+            // delivers the batch to this player's screen rather than the primary player's
+            BedrockServerSession bedrockSession = this.upstream.getSession();
+            int subClientId = bedrockSession.isSubClient()
+                ? ((GeyserBedrockServerSession) bedrockSession).getSubClientId() : 0;
+            bedrockSession.getPeer().sendPacketsImmediately(subClientId, subClientId,
+                queuedImmediatelyPackets.toArray(new BedrockPacket[0]));
             queuedImmediatelyPackets.clear();
 
             CooldownUtils.tickCooldown(this);

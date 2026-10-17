@@ -26,13 +26,24 @@
 package org.geysermc.geyser.network.bedrock;
 
 import io.netty.channel.Channel;
+import lombok.Getter;
+import lombok.Setter;
 import org.cloudburstmc.protocol.bedrock.BedrockPeer;
 import org.cloudburstmc.protocol.bedrock.BedrockSessionFactory;
+import org.geysermc.geyser.session.GeyserSession;
 
 import java.net.SocketAddress;
 
 public class GeyserBedrockPeer extends BedrockPeer {
     private SocketAddress proxiedAddress;
+    /**
+     * The primary (splitscreen client ID 0) session bound to this connection.
+     * Sub-client sessions created for splitscreen players use this to link themselves
+     * to the connection that hosts them.
+     */
+    @Getter
+    @Setter
+    private GeyserSession mainSession;
 
     public GeyserBedrockPeer(Channel channel, BedrockSessionFactory sessionFactory) {
         super(channel, sessionFactory);
